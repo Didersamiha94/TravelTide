@@ -1,0 +1,137 @@
+-- Step 1: Filter sessions data to follow the suggestion by Elena: timeframe > Jan 4 2023 & Ids of Users with > 7 Sessions.
+WITH sessions_2023 AS (  
+  SELECT user_id
+  FROM sessions
+  WHERE session_start > '2023-01-04'
+  GROUP BY user_id
+  HAVING COUNT(session_id) > 7
+),
+
+-- Step 2: Aggregate and combine data
+aggregated_data AS (
+    SELECT
+        s.user_id
+        ,COUNT(DISTINCT s.session_id) AS num_sessions
+        ,ROUND(AVG(EXTRACT(MINUTE FROM (session_end - session_start))),2) AS avg_session_duration_minute         
+        ,ROUND(AVG(page_clicks),2) AS avg_page_clicks
+        ,COUNT(DISTINCT CASE WHEN NOT cancellation THEN s.trip_id END) AS total_trips
+        ,ROUND(CASE WHEN COUNT(DISTINCT s.session_id) > 0 THEN
+              1.0 * COUNT(DISTINCT CASE WHEN NOT cancellation THEN s.trip_id END) / COUNT(DISTINCT s.session_id)
+              ELSE 0 END ,2) AS conversion_rate
+        ,ROUND(1.0 * COUNT(DISTINCT CASE WHEN cancellation THEN s.trip_id END) /
+              NULLIF(COUNT(DISTINCT CASE WHEN NOT cancellation THEN s.trip_id END), 0) ,2) AS cancellation_proportion
+        ,ROUND(AVG(haversine_distance(home_airport_lat, home_airport_lon, destination_airport_lat, destination_airport_lon))) AS avg_distance_flown
+        ,ROUND(AVG(EXTRACT(EPOCH FROM (f.departure_time - s.session_end)) / 86400) ,2) AS avg_booking_departure_gap_days_flights
+        ,ROUND(AVG(EXTRACT(EPOCH FROM (h.check_in_time - s.session_end)) / 86400) ,2) AS avg_booking_departure_gap_days_hotels
+        ,COUNT(DISTINCT CASE WHEN flight_booked THEN s.trip_id END) AS total_flights_booked
+        ,ROUND(AVG(base_fare_usd),2) AS avg_flight_price_usd
+        ,ROUND(AVG(flight_discount_amount),2) AS avg_flight_discount_amount
+        ,ROUND(SUM(CASE WHEN flight_discount THEN 1 ELSE 0 END) :: NUMERIC / COUNT(*),2) AS discounted_flight_proportion
+        ,ROUND(AVG(seats),2) AS avg_flight_seats
+        ,ROUND(AVG(checked_bags),2) AS avg_checked_bags
+        ,COUNT(DISTINCT CASE WHEN hotel_booked THEN s.trip_id END) AS total_hotels_booked
+
+        -- ✅ Fix for negative nights in hotel price calculation
+        ,ROUND(AVG(hotel_per_room_usd * (CASE WHEN nights < 0 THEN 1 ELSE nights END) * rooms),2) AS avg_hotel_price_usd
+
+        ,ROUND(AVG(hotel_discount_amount),2) AS avg_hotel_discount_amount
+        ,ROUND(SUM(CASE WHEN hotel_discount THEN 1 ELSE 0 END) :: NUMERIC / COUNT(*),2) AS discounted_hotel_proportion
+        ,ROUND(AVG(rooms),2) AS avg_hotel_rooms
+
+        -- ✅ Fix for negative hotel stay durations
+        ,ROUND(AVG(GREATEST(EXTRACT(DAY FROM (check_out_time - check_in_time)), 1)),2) AS avg_hotel_stay_duration_day
+
+        ,ROUND(CASE WHEN COUNT(DISTINCT CASE WHEN flight_booked THEN s.trip_id END) > 0 THEN
+              1.0 * COUNT(DISTINCT CASE WHEN return_flight_booked THEN s.trip_id END) /
+              COUNT(DISTINCT CASE WHEN flight_booked THEN s.trip_id END) ELSE 0 END ,2) AS round_trips_proportion
+        ,ROUND(CASE WHEN COUNT(DISTINCT CASE WHEN NOT cancellation THEN s.trip_id END) > 0 THEN
+              1.0 * COUNT(DISTINCT CASE WHEN EXTRACT(DOW FROM departure_time) IN (5,6)
+                  AND return_flight_booked IS TRUE
+                  AND EXTRACT(DOW FROM return_time) IN (0,1)
+                  AND EXTRACT(DAY FROM (return_time - departure_time)) < 3
+                  THEN f.trip_id ELSE NULL END) / COUNT(DISTINCT CASE WHEN NOT cancellation THEN s.trip_id END) ELSE 0 END ,2) AS weekend_trip_proportion
+    FROM sessions AS s
+    LEFT JOIN flights AS f ON s.trip_id = f.trip_id
+    LEFT JOIN hotels AS h ON s.trip_id = h.trip_id
+    LEFT JOIN users AS u ON s.user_id = u.user_id
+    WHERE s.user_id IN (SELECT user_id FROM sessions_2023)
+    GROUP BY s.user_id
+),
+
+-- Step 3: Customer segmentation
+customer_groups AS (
+    SELECT
+        ad.user_id
+        ,CASE
+            WHEN ad.avg_hotel_rooms > 1 AND ad.avg_hotel_stay_duration_day > 3 THEN 'Family Traveller'
+            WHEN ad.avg_flight_price_usd >= 1500 OR ad.avg_hotel_price_usd >= 1000 THEN 'Luxury Seeker'
+            WHEN ad.discounted_flight_proportion >= 0.3 OR ad.discounted_hotel_proportion >= 0.3 THEN 'Budget Conscious'
+            WHEN ad.total_trips >= 4 AND ad.cancellation_proportion < 0.1 THEN 'Frequent Travellers'
+            WHEN ad.avg_booking_departure_gap_days_flights <= 7 AND ad.cancellation_proportion < 0.1 THEN 'Last-Minute Planner'
+            WHEN ad.total_trips > 3 OR ad.cancellation_proportion < 0.1 THEN 'Moderate Explorer'
+            ELSE 'Occasional Traveller'
+        END AS assigned_group
+    FROM aggregated_data AS ad
+),
+
+-- Step 4: Assign perks
+perks_assignment AS (
+    SELECT
+        cg.user_id
+        ,cg.assigned_group
+        ,CASE
+            WHEN cg.assigned_group = 'Family Traveller' THEN 'Free checked bag'
+            WHEN cg.assigned_group = 'Luxury Seeker' THEN 'Free hotel meal'
+            WHEN cg.assigned_group = 'Budget Conscious' THEN 'Exclusive discounts'
+            WHEN cg.assigned_group = 'Frequent Travellers' THEN '1 night free hotel with flight'
+            WHEN cg.assigned_group = 'Last-Minute Planner' THEN 'No cancellation fees'
+            WHEN cg.assigned_group = 'Moderate Explorer' THEN 'Priority boarding'
+            ELSE 'Loyalty points'
+        END AS assigned_perk
+    FROM  customer_groups AS cg
+)
+
+-- Step 5: Combine everything
+SELECT
+    u.user_id
+    ,u.gender
+    ,CASE
+        WHEN DATE_PART('year', AGE(u.birthdate)) BETWEEN 18 AND 24 THEN '18-24'
+        WHEN DATE_PART('year', AGE(u.birthdate)) BETWEEN 25 AND 34 THEN '25-34'
+        WHEN DATE_PART('year', AGE(u.birthdate)) BETWEEN 35 AND 44 THEN '35-44'
+        WHEN DATE_PART('year', AGE(u.birthdate)) BETWEEN 45 AND 54 THEN '45-54'
+        WHEN DATE_PART('year', AGE(u.birthdate)) BETWEEN 55 AND 64 THEN '55-64'
+        WHEN DATE_PART('year', AGE(u.birthdate)) >= 65 THEN '65+'
+    END AS age_group
+    ,u.married
+    ,u.has_children
+    ,u.home_country
+    ,u.home_city
+    ,u.sign_up_date
+    ,ad.num_sessions
+    ,ad.avg_session_duration_minute
+    ,ad.avg_page_clicks
+    ,ad.total_trips
+    ,ad.conversion_rate
+    ,ad.weekend_trip_proportion
+    ,ad.cancellation_proportion
+    ,ad.avg_booking_departure_gap_days_flights
+    ,ad.avg_booking_departure_gap_days_hotels
+    ,ad.round_trips_proportion
+    ,ad.avg_flight_price_usd
+    ,ad.avg_flight_discount_amount
+    ,ad.discounted_flight_proportion
+    ,ad.avg_flight_seats
+    ,ad.avg_checked_bags
+    ,ad.avg_distance_flown
+    ,ad.total_hotels_booked
+    ,ad.avg_hotel_price_usd
+    ,ad.avg_hotel_discount_amount
+    ,ad.discounted_hotel_proportion
+    ,ad.avg_hotel_rooms
+    ,ad.avg_hotel_stay_duration_day
+    ,pa.assigned_group
+    ,pa.assigned_perk
+FROM users AS u
+JOIN aggregated_data AS ad ON u.user_id = ad.user_id
+JOIN perks_assignment AS pa ON u.user_id = pa.user_id;
