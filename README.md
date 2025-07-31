@@ -32,7 +32,7 @@ Contains Tableau workbook screenshots and links to:
 Live dashboard on Tableau Public 👉 [View Dashboard](https://public.tableau.com/views/Traveltide_17536644382430/Story1?:language=en-US&:sid=&:redirect=auth&:display_count=n&:origin=viz_share_link)
 
 ### `/presentation`
-Includes the video presentation (`.mp4`) that walks through:
+Includes the video presentation [Click here to watch the video](https://www.canva.com/design/DAGua_Ef2Zs/QxEgsS21CWRtXM1SGWlAHg/view?utm_content=DAGua_Ef2Zs&utm_campaign=designshare&utm_medium=link2&utm_source=uniquelinks&utlId=h4c3d7eb317) that walks through:
 - Business problem
 - SQL approach
 - Segmentation logic
